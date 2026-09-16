@@ -114,7 +114,22 @@ $nodeProc = Start-Process -NoNewWindow -PassThru -FilePath "node" `
     -WorkingDirectory "$ROOT\server"
 $script:processes += $nodeProc
 
-Start-Sleep -Seconds 2
+Write-Host "   Waiting for Node.js server to initialize..." -ForegroundColor DarkGray
+$nodeReady = $false
+for ($i = 0; $i -lt 15; $i++) {
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:5000/api/health" -UseBasicParsing -ErrorAction SilentlyContinue
+        if ($response.StatusCode -eq 200) {
+            $nodeReady = $true
+            break
+        }
+    } catch {}
+    Start-Sleep -Seconds 1
+}
+
+if (-not $nodeReady) {
+    Write-Warn "Node.js server took too long to respond. Starting Vite anyway..."
+}
 
 Write-Step "Starting Vite dev server on http://localhost:3000 ..."
 $viteProc = Start-Process -NoNewWindow -PassThru -FilePath "cmd.exe" `

@@ -4,14 +4,20 @@ const mongoose = require('mongoose');
 const app = require('./src/app');
 
 const PORT = Number(process.env.PORT) || 5000;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/landslide-gis';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/landslide-gis';
 
 // The database is used for reports and the optional cached risk grid. A
 // temporary database outage must not prevent point-risk calculations.
 try {
   mongoose.connect(MONGO_URI)
     .then(() => console.log('[Server] Connected to MongoDB'))
-    .catch((error) => console.warn('[Server] MongoDB connection failed (starting without DB):', error.message));
+    .catch((error) => {
+      if (!process.env.MONGO_URI) {
+        console.warn('[Server] Local MongoDB not found (starting without DB). Set MONGO_URI to use a database.');
+      } else {
+        console.warn('[Server] MongoDB connection failed (starting without DB):', error.message);
+      }
+    });
 } catch (error) {
   console.warn('[Server] MongoDB initialization failed (starting without DB):', error.message);
 }
