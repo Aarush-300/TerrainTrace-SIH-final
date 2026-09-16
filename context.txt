@@ -1,0 +1,503 @@
+================================================================================
+TerrainTrace — AI Agent Context Reference
+Generated: 2026-09-15  |  Source of truth: actual codebase
+================================================================================
+
+─── PROJECT OVERVIEW ────────────────────────────────────────────────────────────
+
+Name:    TerrainTrace – Landslide Early Warning System
+Contest: Smart India Hackathon (SIH-3)
+Purpose: Real-time AI-driven landslide risk prediction and visualization for the
+         Himalayan/Northeast India region. Users click the map or pan/zoom to
+         receive live ML-based risk assessments derived from terrain, weather,
+         and geology data.
+Status:  Functional MVP. All three services run and communicate. Known gaps listed
+         under TODOs/Issues below.
+
+─── TECH STACK ──────────────────────────────────────────────────────────────────
+
+Layer            Technology / Library
+────────────────────────────────────────────────────────────────────────────────
+Frontend         React 18, Vite 5, react-leaflet 4, Leaflet 1.9, leaflet.markercluster
+                 axios 1.7 (HTTP), plain CSS (App.css), no UI framework
+Backend (Node)   Express 4, Mongoose 8, axios 1.7, GeoTIFF 3 (DEM), csv-parser
+                 dotenv 16, cors 2
+ML Service       Python Flask, flask-cors, scikit-learn 1.9 (joblib), pandas, numpy
+Database         MongoDB Atlas (mongoose). App works without DB (graceful degrade)
+Tile sources     OpenStreetMap (default), Esri World Imagery (satellite)
+External APIs    Open-Meteo (weather + elevation), Macrostrat v2 (lithology)
+                 GEM Active Faults GeoJSON (GitHub raw)
+DEM file         himalayan_cop90_dem.tif  (1.6 GB, Copernicus 90m, stored at repo root)
+Startup          start.ps1  (PowerShell, starts all 3 services sequentially)
+
+─── PORTS ───────────────────────────────────────────────────────────────────────
+
+Service          Port
+────────────────────────────────────────────────────────────────────────────────
+Vite dev server  3000  (proxies /api/* → 5000)
+Node/Express     5000
+Python/Flask     5001
+
+─── FOLDER / FILE STRUCTURE ────────────────────────────────────────────────────
+
+terrain-trace/
+├── himalayan_cop90_dem.tif     Local DEM — required for slope computation
+├── start.ps1                   One-command launcher for all 3 services (Windows)
+├── context.txt                 This file
+├── "all data - labelencoder.py" Root-level ML training/exploration script (not part of app)
+├── .config.py                  Tiny root config (not used by runtime services)
+│
+├── client/                     React SPA
+│   ├── index.html              Vite entrypoint
+│   ├── vite.config.js          Vite config; dev proxy /api → localhost:5000, port 3000
+│   ├── package.json            deps: react, react-dom, react-leaflet, leaflet,
+│   │                               leaflet.markercluster, axios
+│   └── src/
+│       ├── main.jsx            React root mount
+│       ├── App.jsx             Thin shell — renders <Dashboard />
+│       ├── App.css             All global styles (single CSS file, no modules)
+│       ├── api/
+│       │   ├── riskApi.js      predictRisk(), getViewportRisk(), getRiskGrid(),
+│       │   │                   getHealth(), getStats(), getLandslides()
+│       │   └── reportsApi.js   submitReport(), getReports() (getReports stub)
+│       ├── config/
+│       │   └── api.js          API base URL (VITE_API_BASE env var or '') + route map
+│       ├── i18n/
+│       │   └── en.json         All UI text strings (English only)
+│       ├── types/
+│       │   └── risk.js         RISK_COLORS, getRiskColor(), getRiskClass(), REPORT_TYPES
+│       ├── utils/
+│       │   └── geoUtils.js     haversineKm(), convexHull(), dbscan(), buildCorridors(),
+│       │                       buildRiskAreas()  — pure client-side geometry
+│       └── pages/
+│           └── Dashboard.jsx   ← ONLY PAGE. Owns all state (see State section).
+│
+├── server/                     Node.js / Express backend
+│   ├── server.js               Entry: loads .env, connects MongoDB, starts Express
+│   ├── .env                    MONGO_URI, PYTHON_SERVICE_URL, PORT
+│   ├── seed.js                 CSV → MongoDB importer for Landslide collection
+│   ├── package.json            deps: express, mongoose, axios, cors, dotenv,
+│   │                               geotiff, csv-parser
+│   ├── models/
+│   │   ├── Landslide.js        Historical event schema (2dsphere index)
+│   │   ├── FieldReport.js      Citizen report schema (2dsphere index)
+│   │   ├── RiskZone.js         Pre-computed grid cell (batchId, polygon, scores)
+│   │   └── RiskZoneBatch.js    Batch pointer for atomic grid swaps (isActive flag)
+│   └── src/
+│       ├── app.js              Express app: CORS, routes, error handler,
+│       │                       legacy endpoints /api/predict-point, /api/risk-zones
+│       ├── config/
+│       │   ├── features.js     Loads features.json, filters by enabled flag
+│       │   ├── features.json   Feature registry: name→source, provider_key, model_key,
+│       │   │                   required_for_prediction  (7 features defined)
+│       │   └── risk-levels.json Probability thresholds: LOW<0.4, MODERATE<0.6,
+│       │                       HIGH<0.8, CRITICAL≤1.0
+│       ├── controllers/
+│       │   ├── risk.controller.js      predictRisk(), predictPointLegacy(),
+│       │   │                           buildPrediction() — orchestrates feature+ML
+│       │   ├── viewportController.js   getViewportRisk() — batch prediction for
+│       │   │                           map viewport; slope-filtered, jittered grid
+│       │   ├── grid.controller.js      getRiskGrid(), getCurrentZones() — MongoDB
+│       │   │                           cached grid (optional/legacy)
+│       │   ├── reports.controller.js   createReport() — field report CRUD
+│       │   └── health.controller.js    /api/health status check
+│       ├── routes/
+│       │   ├── risk.routes.js          POST /predict, GET /grid, POST /viewport
+│       │   ├── reports.routes.js       POST /api/reports
+│       │   └── health.routes.js        GET /api/health
+│       ├── services/
+│       │   ├── feature.service.js      collectFeatures() — fans out to all providers,
+│       │   │                           5s timeout each, aggregates results
+│       │   ├── terrain.service.js      getTerrainFeatures() — Open-Meteo elevation API;
+│       │   │                           computes slope from 4 surrounding sample points;
+│       │   │                           TTL cache 24h
+│       │   ├── weather.service.js      getWeatherFeatures() — Open-Meteo forecast;
+│       │   │                           past 72h precip + soil moisture; TTL cache 10m
+│       │   ├── geology.service.js      getGeologyFeatures() — Macrostrat lithology +
+│       │   │                           GEM faults (nearest segment distance); TTL 7d
+│       │   ├── ml.service.js           predict() — HTTP POST to Python /predict;
+│       │   │                           MlServiceError wrapper; timeout 30s
+│       │   └── infrastructure.service.js  Stub — always returns unavailable
+│       └── utils/
+│           ├── cache.js                TtlCache class (in-memory Map with expiry)
+│           ├── demReader.js            getSlope() — reads himalayan_cop90_dem.tif
+│           │                           via geotiff lib; 3×3 pixel window; lazy init
+│           ├── risk-levels.js          getRiskLevel(probability) — uses config/risk-levels.json
+│           └── validation.js           parseLocation(), validationError()
+│
+└── python-service/             Flask ML inference microservice
+    ├── app.py                  Flask app; GET /health, POST /predict
+    ├── predictor.py            ModelPredictor class; loads joblib; get_predictor() singleton
+    ├── schemas.py              validate_features(), build_model_frame(),
+    │                           build_raw_feature_frame(), load_feature_schema()
+    ├── feature_schema.json     7 feature definitions with types, minimums, model_column
+    ├── requirements.txt        flask, flask-cors, scikit-learn==1.9.0, joblib, pandas, numpy
+    └── models/
+        └── active/
+            ├── landslide_model_package.joblib  Bundled trained model (173 KB)
+            └── README.md                       Notes on active model
+
+─── FRONTEND ARCHITECTURE ───────────────────────────────────────────────────────
+
+Multi-page SPA using React Router v6.
+
+Routing & Layout (App.jsx, NavShell.jsx):
+  /gis-dashboard   → Dashboard.jsx (Main Map View)
+  /report          → ReportPage.jsx (Landslide Documentation Portal, offline-first)
+  /safety          → SafetyPage.jsx (High Risk Areas & Safety Measures)
+  /admin/alerts    → AlertDispatchPage.jsx (CAP XML Alert Console)
+  /routes          → EmergencyRoutesPage.jsx (OSRM Route Planner)
+
+State (Dashboard.jsx — lifted state for Map/Sidebar):
+  landslides, liveRiskPoints, liveLoading, prediction, predictionStatus, 
+  predictionError, staleAt, selectedLat/Lng, fieldReports, statsRefreshKey
+  NEW: riskHorizon (nowcast/24h/72h), selectedState
+
+Derived (useMemo in Dashboard.jsx):
+  corridors, riskAreas
+
+Key data flows:
+  1. On mount: getLandslides() → Map renders historical markers
+  2. On map pan/zoom: getViewportRisk(bounds, zoom, riskHorizon)
+     → liveRiskPoints accumulate → corridors + riskAreas recomputed
+  3. On map click: predictRisk(lat,lng) → prediction state → RiskPanel
+  4. On report submit (/report): submitReportWithMedia → POST /api/reports. 
+     If offline, saves to IndexedDB and registers background sync ('sync-reports').
+
+Components:
+  NavShell.jsx      Shared layout wrapper with sidebar and mobile hamburger
+  Dashboard.jsx     GIS Dashboard page shell
+  Map.jsx           Leaflet map with new overlays (Roads, Assets, Rainfall)
+  FilterBar.jsx     Controls for state/district zooming and risk horizon
+  ReportPage.jsx    Full-page form with GPS extraction and image compression
+  SafetyPage.jsx    Displays active HIGH/CRITICAL zones and safety accordion
+  AlertDispatchPage.jsx  Pending reports table + multilingual CAP alert form
+  EmergencyRoutesPage.jsx Priority triage table + OSRM route planner map
+
+Map configuration:
+  Default center: [22, 88], zoom 5
+  Base layers: OpenStreetMap, Esri World Imagery
+  Overlays: Landslide Points, Risk Corridors, Risk Areas, Historical Landslides, 
+            Citizen Reports, Road Connectivity, Vulnerable Assets, Rainfall Overlay
+  LOW/UNKNOWN risk points filtered out before rendering.
+
+─── BACKEND API ENDPOINTS ───────────────────────────────────────────────────────
+
+Method  Path                        Handler / Notes
+──────────────────────────────────────────────────────────────────────────────
+POST    /predict_batch               (Python) app.py — Single vectorized prediction for multiple points. Returns { results: [] }
+POST    /api/risk/predict            risk.controller.predictRisk (Point prediction)
+POST    /api/risk/viewport           viewportController.getViewportRisk (Batch viewport prediction, calls predictBatch)
+GET     /api/risk/grid               grid.controller.getRiskGrid (Cached RiskZones)
+
+GET     /api/reports                 reports.controller.getReports (List with filters)
+GET     /api/reports/:id             reports.controller.getReportById
+PATCH   /api/reports/:id/status      reports.controller.updateReportStatus (VERIFIED/REJECTED)
+POST    /api/reports                 reports.controller.createReport (Now supports multipart/form-data for media)
+
+GET     /api/assets                  assets.controller.getAssets (Schools/Hospitals/Villages via Overpass)
+GET     /api/assets/roads            assets.controller.getRoads (Roads via Overpass, cross-ref with ROAD_BLOCKAGE)
+
+GET     /api/safety/zones            safety.controller.getHighRiskZones (Active HIGH/CRITICAL zones)
+
+POST    /api/v1/alerts               alerts.controller.createAlert (Creates alert + CAP XML)
+GET     /api/v1/alerts               alerts.controller.getAlerts
+GET     /api/v1/alerts/feed.xml      alerts.controller.getAlertFeed (Aggregated CAP 1.2 XML feed)
+
+GET     /api/routes/triage           routes.controller.getTriageTable (Isolated villages near blockages)
+GET     /api/routes/find             routes.controller.findRoute (OSRM proxy with blockage flagging)
+
+GET     /api/health                  health.controller — checks DB + ML service
+GET     /api/stats                   app.js inline — counts
+GET     /api/landslides              app.js inline — bbox filterable
+POST    /api/predict-point           predictPointLegacy
+GET     /api/risk-zones              getRiskGrid (alias)
+POST    /api/risk-zones/refresh      Returns 202
+
+─── FEATURE COLLECTION PIPELINE (Node) ──────────────────────────────────────────
+
+feature.service.collectFeatures(location)
+  ├── terrain.service.getTerrainFeatures()
+  │     → Open-Meteo /v1/elevation (5 sample points, 100m offsets)
+  │     → elevation_m, slope_deg (computed from N/S/E/W gradient)
+  │     → TTL cache 24h, cache key: lat.toFixed(3),lng.toFixed(3)
+  ├── weather.service.getWeatherFeatures()
+  │     → Open-Meteo /v1/forecast (past_hours=72, hourly precip + soil moisture)
+  │     → rainfall_24h_mm (sum last 24 hourly values)
+  │     → rainfall_3d_mm  (sum last 72 hourly values)
+  │     → soil_moisture_pct (last known soil_moisture_0_to_7cm × 100)
+  │     → TTL cache 10min
+  ├── geology.service.getGeologyFeatures()
+  │     → Macrostrat /api/v2/geologic_units/map → lithology string
+  │     → GEM faults GeoJSON (fetched once, process-level cache) → fault_distance_m
+  │     → TTL cache 7 days (lithology)
+  └── infrastructure.service — always returns unavailable (stub)
+
+Returns: { features, missingFeatures, requiredMissingFeatures, providerStatus, dataTimestamp }
+CatBoost handles NaN natively — prediction proceeds even with missing features.
+
+─── ML/AI PREDICTION FLOW ───────────────────────────────────────────────────────
+
+Node → Python flow (Batch Optimized):
+  ml.service.predictBatch(features_list)
+    → POST http://localhost:5001/predict_batch  { points: [{features: {...}}, ...] }
+    → Python: schemas.validate_features() per point → build_model_frame_batch() 
+    → Single predict_proba() call on multi-row DataFrame
+    → Response: { results: [{ probability, risk_score, confidence, model_version }, ...] }
+
+Python predictor (predictor.py):
+  - Singleton via get_predictor()
+  - predict() for single point, predict_batch() for arrays
+  - Loads models/active/landslide_model_package.joblib
+
+ML output:
+  probability    float [0,1]     P(landslide)
+  risk_score     int [0,100]     probability × 100 rounded
+  confidence     float           max(p, 1-p)
+  model_version  string          from env or feature_schema.json
+
+Risk level thresholds (server/src/config/risk-levels.json):
+  LOW      probability ≤ 0.39
+  MODERATE probability ≤ 0.59
+  HIGH     probability ≤ 0.79
+  CRITICAL probability ≤ 1.00
+
+─── GIS / MAP DATA FLOW ─────────────────────────────────────────────────────────
+
+DEM (Digital Elevation Model):
+  File: himalayan_cop90_dem.tif (1.6 GB)
+  Reader: server/src/utils/demReader.js (getSlope reads 3x3 pixel window)
+
+Viewport batch prediction (viewportController.js):
+  - Receives {bounds, zoom, riskHorizon}
+  - Computes dynamic step and jitter
+  - Reads DEM slope per point, drops slope < 5°
+  - Collects regional features once at viewport center
+  - Makes ONE predictBatch() call for all uncached points (eliminates N+1 issue)
+  - Point cache TTL 10 min (TtlCache)
+
+Client-side derived layers (geoUtils.js):
+  buildCorridors: HIGH+CRITICAL chains via graph DFS
+  buildRiskAreas: DBSCAN + convex hull for MODERATE+ points
+
+Emergency Routes (OSRM):
+  - Origin/Dest → POST /api/routes/find → OSRM public API proxy
+  - Post-processes route geojson to flag segments passing near VERIFIED ROAD_BLOCKAGE reports.
+
+─── DATABASE MODELS ─────────────────────────────────────────────────────────────
+
+Landslide (models/Landslide.js)
+  Fields: event_id, event_date, event_title, location_description,
+          landslide_category, landslide_trigger, landslide_size,
+          fatality_count, country_name, latitude, longitude,
+          location (GeoJSON Point)
+  Index: 2dsphere on location
+  Data source: Global Landslide Catalog CSV (NASA),
+               filtered lat 21–34, lon 75–98 (Indian subcontinent)
+  Seeded via: npm run seed (server/seed.js)
+  CSV not in repo: Global_Landslide_Catalog_Export_rows.csv at repo root level
+
+FieldReport (models/FieldReport.js)
+  Fields: latitude, longitude, type (enum), description, imageReference,
+          videoReference, reportedAt, location (GeoJSON Point)
+  Timestamps: createdAt, updatedAt (mongoose)
+  Index: 2dsphere on location
+
+RiskZone (models/RiskZone.js)
+  Fields: batchId, center_lat, center_lng, probability, riskLevel,
+          elevation_m, slope_deg, fault_distance_m, rainfall_3d_mm,
+          rainfall_24h_intensity, soil_moisture_pct,
+          polygon (GeoJSON Polygon), computedAt
+  Index: 2dsphere on polygon, regular on batchId
+  Purpose: stores pre-computed grid; read by /api/risk/grid
+
+RiskZoneBatch (models/RiskZoneBatch.js)
+  Fields: batchId (unique), computedAt, isActive
+  Purpose: atomic batch pointer; set isActive=true to activate a batch
+
+─── ENVIRONMENT VARIABLES ───────────────────────────────────────────────────────
+
+Server (server/.env):
+  MONGO_URI              MongoDB connection string
+  PYTHON_SERVICE_URL     URL of Python Flask service (default: http://localhost:5001)
+  PORT                   Express port (default: 5000)
+
+Server (additional, optional, not in .env):
+  ML_SERVICE_URL         Alias for PYTHON_SERVICE_URL
+  ML_TIMEOUT_MS          HTTP timeout to Python (default: 30000)
+  ELEVATION_URL          Open-Meteo elevation endpoint
+  WEATHER_URL            Open-Meteo forecast endpoint
+  LITHOLOGY_URL          Macrostrat API endpoint
+  FAULTS_URL             GEM faults GeoJSON URL
+  TERRAIN_CACHE_TTL_MS   Terrain cache TTL (default: 86400000)
+  WEATHER_CACHE_TTL_MS   Weather cache TTL (default: 600000)
+  GEOLOGY_CACHE_TTL_MS   Geology cache TTL (default: 604800000)
+  TERRAIN_TIMEOUT_MS     Open-Meteo elevation timeout (default: 8000)
+  WEATHER_TIMEOUT_MS     Open-Meteo forecast timeout (default: 8000)
+  GEOLOGY_TIMEOUT_MS     Macrostrat timeout (default: 8000)
+  FAULTS_TIMEOUT_MS      GEM faults fetch timeout (default: 20000)
+
+Python service:
+  HOST                   Flask host (default: 0.0.0.0)
+  PORT                   Flask port (default: 5001)
+  MODEL_PATH             Path to model file (default: models/active/model.joblib or
+                         landslide_model_package.joblib)
+  PREPROCESSING_PATH     Path to preprocessing.joblib (optional)
+  MODEL_VERSION          Override model version string
+  FEATURE_SCHEMA_PATH    Path to feature_schema.json (default: same dir as app.py)
+
+Client:
+  VITE_API_BASE          Backend base URL (default: '' = relative, works via Vite proxy)
+
+─── CONFIGURATIONS & CONVENTIONS ────────────────────────────────────────────────
+
+Feature registry (server/src/config/features.json):
+  Single source of truth for which features are collected.
+  Each entry: enabled, source (terrain/weather/geology/infrastructure),
+  provider_key (key in service result.values), model_key, required_for_prediction.
+  Disable a feature by setting "enabled": false — no code change needed.
+
+Risk levels (server/src/config/risk-levels.json):
+  Configurable probability thresholds. Order matters; find() returns first match.
+  Thresholds: 0.39/0.59/0.79/1.0 for LOW/MODERATE/HIGH/CRITICAL.
+
+Feature schema (python-service/feature_schema.json):
+  Owns model_column mapping and categorical coercion rules.
+  model_version field sets default version string.
+
+API module convention (client):
+  All HTTP calls go through src/api/ modules (riskApi.js, reportsApi.js).
+  Never call axios directly from components.
+
+All UI text via src/i18n/en.json — use t.keyName pattern, never hardcode strings.
+
+CSS: single file App.css. No CSS modules. Class names: kebab-case.
+
+MongoDB optional: server starts without DB. All DB-dependent endpoints return
+empty/graceful responses when mongoose.connection.readyState !== 1.
+
+Error propagation:
+  - MlServiceError → app.js handler → 502/422 with clean JSON
+  - Validation errors have .status property set → res.status(error.status)
+  - Unhandled → 500
+
+─── IMPLEMENTED FEATURES ────────────────────────────────────────────────────────
+
+- Real-time landslide risk prediction on map click (lat/lng → ML probability)
+- Viewport-based batch risk prediction (pan/zoom → grid of risk points on map)
+- Slope pre-filtering using local Copernicus DEM (flat terrain excluded)
+- Risk point accumulation across viewport pans (no duplicates, keyed by coords)
+- Risk corridors derived client-side (HIGH+CRITICAL chains via graph DFS)
+- Risk area polygons derived client-side (DBSCAN + convex hull)
+- Early warning banner (CRITICAL/HIGH count in current viewport)
+- Historical landslide overlay (from MongoDB/NASA catalog, filterable by bbox)
+- Field/citizen report submission (POST /api/reports, stored in MongoDB)
+- Stats panel (total zones by level + total historical events from /api/stats)
+- Online/offline detection with status badge
+- Partial prediction support (some features missing, CatBoost handles NaN)
+- Multiple base layers: Street Map + Satellite
+- Layer toggle control (all overlays toggleable)
+- Feature TTL caching (terrain 24h, weather 10min, geology 7d, viewport points 10min)
+- Graceful DB-down operation (all non-DB endpoints remain functional)
+- Model hot-swap: replace models/active/ files → restart Python service
+
+─── KNOWN ISSUES / TODOS / HARDCODED VALUES ────────────────────────────────────
+
+PROXY/HARDCODED:
+  - viewportController.js line 84: elevation_m = slope_deg × 100
+    This is an explicit fallback proxy, NOT real elevation. The DEM is used for
+    slope only; elevation from DEM is not extracted (only slope from 3×3 window).
+  - Viewport regional features sampled at viewport CENTER only. Points near
+    viewport edges share center's weather/geology, not their own.
+
+CONCURRENCY:
+  - viewportController CONCURRENCY=2: deliberately low to avoid Open-Meteo
+    rate-limiting bans. Each point still triggers 1 ML call to Python.
+    With target 400 points per viewport, this can be slow.
+
+STUB/INCOMPLETE:
+  - infrastructure.service.js: always returns unavailable. No road/bridge data.
+  - getReports() in reportsApi.js: backend has no GET /api/reports endpoint yet;
+    the function silently returns [].
+  - POST /api/risk-zones/refresh: returns 202 with no action (intentional stub).
+
+DBSCAN PERFORMANCE:
+  - geoUtils.dbscan() is O(n²). With hundreds of viewport points it may lag
+    during riskAreas computation on low-end devices.
+
+MODEL:
+  - Bundled model: landslide_model_package.joblib (scikit-learn, 173 KB).
+  - No CatBoost native model currently active (feature_schema.json references
+    CatBoost-style categorical handling, but active model may be sklearn).
+  - "confidence" field is max(p, 1-p) — not calibrated uncertainty.
+
+SEED:
+  - seed.js expects Global_Landslide_Catalog_Export_rows.csv at the path
+    terrain-trace/../Global_Landslide_Catalog_Export_rows.csv (one level above).
+  - CSV is not committed to the repo.
+
+DEM:
+  - himalayan_cop90_dem.tif (1.6 GB) lives at terrain-trace/ root.
+  - DEM covers Himalayan region only. Points outside bbox return slope=0.
+  - Not committed to git (too large); must be placed manually.
+
+LEGACY ENDPOINTS:
+  - /api/predict-point (POST, body: {lat,lng}) — kept for compatibility,
+    maps to predictPointLegacy. New clients should use /api/risk/predict.
+  - /api/risk-zones (GET) — alias for /api/risk/grid.
+
+─── TESTING ─────────────────────────────────────────────────────────────────────
+
+server/test/risk-levels.test.js    Unit tests for getRiskLevel thresholds
+server/test/validation.test.js     Unit tests for parseLocation validation
+python-service/tests/test_predictor.py  Tests ModelPredictor initialization/predict
+python-service/tests/test_schemas.py    Tests feature validation and frame building
+Run server tests: npm test  (from server/)
+Run Python tests: python -m pytest tests/ (from python-service/)
+
+─── STARTUP SEQUENCE ────────────────────────────────────────────────────────────
+
+./start.ps1 (from terrain-trace/):
+  1. Checks node, python, MongoDB
+  2. npm install (server + client, skips if node_modules exists)
+  3. pip install -r requirements.txt (python-service)
+  4. Kills any stale processes on 3000/5000/5001
+  5. Starts python app.py (waits 5s)
+  6. Starts node server.js (waits 2s)
+  7. Starts vite --host (client)
+  8. Monitors processes, exits all on any crash or Ctrl+C
+
+Manual start order: Python service first → Node server → Vite client
+
+─── CRITICAL RULES FOR FUTURE CHANGES ──────────────────────────────────────────
+
+1. Feature registry is features.json (server/src/config/). To add a feature:
+   add entry to features.json, implement provider, add to feature_schema.json.
+
+2. Risk thresholds are in risk-levels.json only — not duplicated in code.
+
+3. All client HTTP goes through src/api/ — never call axios in components.
+
+4. All UI text must come from i18n/en.json — no inline strings.
+
+5. RISK_COLORS/getRiskColor/getRiskClass live in src/types/risk.js — do not
+   duplicate color constants in components (they already exist in Map.jsx as
+   CORRIDOR_COLORS/AREA_COLORS; keep those in sync with types/risk.js).
+
+6. viewportController and risk.controller both call collectFeatures() — any
+   changes to feature aggregation affect both prediction paths.
+
+7. Python service is stateless except for the singleton model. Model swap = file
+   replacement in models/active/ + Python service restart.
+
+8. DB failure must not break point prediction (/api/risk/predict works without
+   MongoDB). Always guard DB operations with readyState check.
+
+9. scikit-learn version is pinned to 1.9.0 in requirements.txt — do not change
+   without re-serializing the model.
+
+10. Viewport point cache is per-point (cacheKey by lat/lng). Clearing it requires
+    restarting the Node server (in-memory TtlCache, no Redis).
+
+================================================================================
+

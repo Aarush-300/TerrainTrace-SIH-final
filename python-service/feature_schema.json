@@ -1,0 +1,12 @@
+{
+  "model_version": "v1",
+  "features": [
+    { "name": "elevation_m", "type": "numeric", "minimum": -500, "model_column": "elevation_m", "required": true },
+    { "name": "slope_deg", "type": "numeric", "minimum": 0, "model_column": "slope_deg", "required": true },
+    { "name": "fault_distance_m", "type": "numeric", "minimum": 0, "model_column": "fault_distance_m", "required": true },
+    { "name": "rainfall_3d_mm", "type": "numeric", "minimum": 0, "model_column": "rainfall_3d_mm", "required": true },
+    { "name": "rainfall_24h_mm", "type": "numeric", "minimum": 0, "model_column": "rainfall_24h_intensity", "required": true },
+    { "name": "soil_moisture_pct", "type": "numeric", "minimum": 0, "model_column": "soil_moisture_pct", "required": true },
+    { "name": "lithology", "type": "categorical", "model_column": "lithology", "model_column_prefix": "lithology_", "required": true }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "elevation_m": { "enabled": true, "source": "terrain", "provider_key": "elevation", "model_key": "elevation_m", "required_for_prediction": true },
+  "slope_deg": { "enabled": true, "source": "terrain", "provider_key": "slope", "model_key": "slope_deg", "required_for_prediction": true },
+  "lithology": { "enabled": true, "source": "geology", "provider_key": "lithology", "model_key": "lithology", "required_for_prediction": true },
+  "rainfall_24h_mm": { "enabled": true, "source": "weather", "provider_key": "rainfall_24h", "model_key": "rainfall_24h_intensity", "required_for_prediction": true },
+  "rainfall_3d_mm": { "enabled": true, "source": "weather", "provider_key": "rainfall_3d", "model_key": "rainfall_3d_mm", "required_for_prediction": true },
+  "soil_moisture_pct": { "enabled": true, "source": "weather", "provider_key": "soil_moisture", "model_key": "soil_moisture_pct", "required_for_prediction": true },
+  "fault_distance_m": { "enabled": true, "source": "geology", "provider_key": "fault_distance", "model_key": "fault_distance_m", "required_for_prediction": true }
+}

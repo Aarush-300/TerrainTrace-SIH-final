@@ -1,0 +1,8 @@
+flask
+flask-cors
+joblib
+# The bundled model was serialized with this version. Keeping it aligned
+# avoids unsafe or incorrect deserialization across scikit-learn releases.
+scikit-learn==1.9.0
+pandas
+numpy

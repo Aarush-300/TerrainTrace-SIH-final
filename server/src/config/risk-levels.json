@@ -1,0 +1,8 @@
+{
+  "levels": [
+    { "max_probability": 0.39, "level": "LOW" },
+    { "max_probability": 0.59, "level": "MODERATE" },
+    { "max_probability": 0.79, "level": "HIGH" },
+    { "max_probability": 1.0, "level": "CRITICAL" }
+  ]
+}
