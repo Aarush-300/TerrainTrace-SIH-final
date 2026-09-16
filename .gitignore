@@ -7,3 +7,4 @@ dist/
 *.tif
 terrain_features.csv
 .config.py
+*.joblib
