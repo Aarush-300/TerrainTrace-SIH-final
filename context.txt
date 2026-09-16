@@ -53,7 +53,7 @@ terrain-trace/
 │   ├── package.json            deps: react, react-dom, react-leaflet, leaflet,
 │   │                               leaflet.markercluster, axios
 │   └── src/
-│       ├── main.jsx            React root mount
+│       ├── main.jsx            React root mount; BrowserRouter with v7 future flags
 │       ├── App.jsx             Thin shell — renders <Dashboard />
 │       ├── App.css             All global styles (single CSS file, no modules)
 │       ├── api/
@@ -65,7 +65,8 @@ terrain-trace/
 │       ├── i18n/
 │       │   └── en.json         All UI text strings (English only)
 │       ├── types/
-│       │   └── risk.js         RISK_COLORS, getRiskColor(), getRiskClass(), REPORT_TYPES
+│       │   └── risk.js         RISK_COLORS (includes MODERATE+MEDIUM+HIGH+CRITICAL),
+│       │                       getRiskColor(), getRiskClass(), REPORT_TYPES
 │       ├── utils/
 │       │   └── geoUtils.js     haversineKm(), convexHull(), dbscan(), buildCorridors(),
 │       │                       buildRiskAreas()  — pure client-side geometry
@@ -175,11 +176,15 @@ Components:
   EmergencyRoutesPage.jsx Priority triage table + OSRM route planner map
 
 Map configuration:
-  Default center: [22, 88], zoom 5
+  Default center: [22, 88], zoom 5, maxZoom 18
   Base layers: OpenStreetMap, Esri World Imagery
-  Overlays: Landslide Points, Risk Corridors, Risk Areas, Historical Landslides, 
+  Overlays: Risk Corridors, Risk Areas, Historical Landslides, 
             Citizen Reports, Road Connectivity, Vulnerable Assets, Rainfall Overlay
+  Live risk points rendered via leaflet.markercluster (ClusteredRiskLayer).
+  maxZoom is required by leaflet.markercluster — omitting it causes a crash.
   LOW/UNKNOWN risk points filtered out before rendering.
+  Marker colors: CRITICAL=#ef4444 (red), HIGH=#f97316 (orange),
+                 MODERATE/MEDIUM=#eab308 (yellow). Uses getRiskColor() from risk.js.
 
 ─── BACKEND API ENDPOINTS ───────────────────────────────────────────────────────
 
@@ -221,16 +226,21 @@ feature.service.collectFeatures(location)
   │     → Open-Meteo /v1/elevation (5 sample points, 100m offsets)
   │     → elevation_m, slope_deg (computed from N/S/E/W gradient)
   │     → TTL cache 24h, cache key: lat.toFixed(3),lng.toFixed(3)
+  │     NEW: getTerrainFeaturesBatch(locations) — bulk elevation fetch,
+  │          flattens 5×N sample coords into one API call (chunked at 50 locs)
   ├── weather.service.getWeatherFeatures()
   │     → Open-Meteo /v1/forecast (past_hours=72, hourly precip + soil moisture)
   │     → rainfall_24h_mm (sum last 24 hourly values)
   │     → rainfall_3d_mm  (sum last 72 hourly values)
   │     → soil_moisture_pct (last known soil_moisture_0_to_7cm × 100)
   │     → TTL cache 10min
+  │     NEW: getWeatherFeaturesBatch(locations) — bulk weather fetch,
+  │          comma-separated coords in one API call (chunked at 50 locs)
   ├── geology.service.getGeologyFeatures()
-  │     → Macrostrat /api/v2/geologic_units/map → lithology string
+  │     → Macrostrat /api/v2/geologic_units/map → lithology string (wrapped in robust try/catch)
   │     → GEM faults GeoJSON (fetched once, process-level cache) → fault_distance_m
   │     → TTL cache 7 days (lithology)
+  │     → Uses fallback definitions for lithology and fault_distance if requestedDefinitions is omitted
   └── infrastructure.service — always returns unavailable (stub)
 
 Returns: { features, missingFeatures, requiredMissingFeatures, providerStatus, dataTimestamp }
@@ -272,13 +282,19 @@ Viewport batch prediction (viewportController.js):
   - Receives {bounds, zoom, riskHorizon}
   - Computes dynamic step and jitter
   - Reads DEM slope per point, drops slope < 5°
-  - Collects regional features once at viewport center
-  - Makes ONE predictBatch() call for all uncached points (eliminates N+1 issue)
+  - Fetches geology/fault data once at viewport center (process-cached)
+  - Calls getWeatherFeaturesBatch() + getTerrainFeaturesBatch() in parallel
+    for all uncached points — per-point weather/terrain instead of center-only
+  - Makes ONE predictBatch() call for all uncached points
   - Point cache TTL 10 min (TtlCache)
 
 Client-side derived layers (geoUtils.js):
   buildCorridors: HIGH+CRITICAL chains via graph DFS
-  buildRiskAreas: DBSCAN + convex hull for MODERATE+ points
+  buildRiskAreas: grid-indexed DBSCAN (O(n×k)) + convex hull for MODERATE+ points
+
+Client-side marker rendering (Map.jsx):
+  ClusteredRiskLayer: imperative L.markerClusterGroup for live risk points
+  (replaces 400+ individual React CircleMarker components with native clustering)
 
 Emergency Routes (OSRM):
   - Origin/Dest → POST /api/routes/find → OSRM public API proxy
@@ -404,16 +420,19 @@ Error propagation:
 ─── KNOWN ISSUES / TODOS / HARDCODED VALUES ────────────────────────────────────
 
 PROXY/HARDCODED:
-  - viewportController.js line 84: elevation_m = slope_deg × 100
-    This is an explicit fallback proxy, NOT real elevation. The DEM is used for
-    slope only; elevation from DEM is not extracted (only slope from 3×3 window).
-  - Viewport regional features sampled at viewport CENTER only. Points near
-    viewport edges share center's weather/geology, not their own.
+  - viewportController.js: elevation_m fallback = slopeDeg × 100 when
+    Open-Meteo elevation API is unavailable. Real elevation is now fetched
+    via getTerrainFeaturesBatch() and used when available.
+  - Geology/fault data still sampled at viewport CENTER only (these are
+    process-cached and vary slowly across a viewport). Weather and terrain
+    are now fetched per-point via bulk API.
 
-CONCURRENCY:
-  - viewportController CONCURRENCY=2: deliberately low to avoid Open-Meteo
-    rate-limiting bans. Each point still triggers 1 ML call to Python.
-    With target 400 points per viewport, this can be slow.
+BATCH API:
+  - viewportController calls getWeatherFeaturesBatch() and
+    getTerrainFeaturesBatch() in parallel for all uncached points.
+    Each function chunks requests (50 locations/batch for weather,
+    50 locations = 250 sample coords for terrain) to respect Open-Meteo limits.
+  - Old CONCURRENCY=2 bottleneck has been removed.
 
 STUB/INCOMPLETE:
   - infrastructure.service.js: always returns unavailable. No road/bridge data.
@@ -421,15 +440,20 @@ STUB/INCOMPLETE:
     the function silently returns [].
   - POST /api/risk-zones/refresh: returns 202 with no action (intentional stub).
 
-DBSCAN PERFORMANCE:
-  - geoUtils.dbscan() is O(n²). With hundreds of viewport points it may lag
-    during riskAreas computation on low-end devices.
+DBSCAN PERFORMANCE (RESOLVED):
+  - geoUtils.dbscan() was O(n²), now uses spatial hash grid for O(n×k) where
+    k is cluster density. regionQuery checks 3×3 neighboring cells instead of
+    all N points. seed.includes() replaced with Set for O(1) lookup.
+  - Live risk markers now use leaflet.markercluster (ClusteredRiskLayer
+    component in Map.jsx) for efficient rendering of 400+ points.
 
 MODEL:
   - Bundled model: landslide_model_package.joblib (scikit-learn, 173 KB).
-  - No CatBoost native model currently active (feature_schema.json references
-    CatBoost-style categorical handling, but active model may be sklearn).
+  - CatBoost native model support is active (`catboost==1.2.2` added to requirements.txt)
+    to allow the ML service to successfully deserialize the model package.
   - "confidence" field is max(p, 1-p) — not calibrated uncertainty.
+  - ML service connection errors (e.g. from Python service on port 5001) are
+    logged verbosely in ml.service.js and viewportController.js to aid debugging 502 Bad Gateway errors.
 
 SEED:
   - seed.js expects Global_Landslide_Catalog_Export_rows.csv at the path
@@ -484,8 +508,9 @@ Manual start order: Python service first → Node server → Vite client
    duplicate color constants in components (they already exist in Map.jsx as
    CORRIDOR_COLORS/AREA_COLORS; keep those in sync with types/risk.js).
 
-6. viewportController and risk.controller both call collectFeatures() — any
-   changes to feature aggregation affect both prediction paths.
+6. viewportController uses getWeatherFeaturesBatch + getTerrainFeaturesBatch
+   directly (not collectFeatures). risk.controller still uses collectFeatures().
+   Changes to feature aggregation in feature.service affect only point prediction.
 
 7. Python service is stateless except for the singleton model. Model swap = file
    replacement in models/active/ + Python service restart.

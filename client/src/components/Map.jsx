@@ -187,6 +187,90 @@ const LiveRiskLoadingIndicator = ({ loading }) => {
   return <div className="live-risk-loading">⏳ Fetching live risk data…</div>;
 };
 
+// ── Clustered Risk Layer ───────────────────────────────────────────────
+
+/**
+ * Imperatively manages a MarkerClusterGroup for live risk points.
+ * Uses Leaflet's native L.markerClusterGroup instead of 400+ React
+ * CircleMarker components — dramatically faster add/remove/cluster.
+ */
+const ClusteredRiskLayer = ({ liveRiskPoints, onPointClick }) => {
+  const map = useMap();
+  const clusterGroupRef = useRef(null);
+
+  useEffect(() => {
+    if (!map) return;
+
+    // Create or clear the cluster group
+    if (clusterGroupRef.current) {
+      clusterGroupRef.current.clearLayers();
+    } else {
+      clusterGroupRef.current = L.markerClusterGroup({
+        maxClusterRadius: 40,
+        spiderfyOnMaxZoom: true,
+        showCoverageOnHover: false,
+        chunkedLoading: true,
+        disableClusteringAtZoom: 12,
+      });
+      map.addLayer(clusterGroupRef.current);
+    }
+
+    // Build all markers as native Leaflet layers
+    const markers = [];
+    for (const zone of liveRiskPoints) {
+      const riskLevel = (zone.properties?.riskLevel || zone.riskLevel || 'UNKNOWN').toUpperCase();
+      if (riskLevel === 'LOW' || riskLevel === 'UNKNOWN' || riskLevel.includes('PARTIAL')) continue;
+
+      const lat = parseFloat(zone.properties?.center_lat || zone.lat || zone.latitude);
+      const lng = parseFloat(zone.properties?.center_lng || zone.lon || zone.longitude);
+      if (isNaN(lat) || isNaN(lng)) continue;
+
+      const color = getRiskColor(riskLevel);
+      const prob = ((zone.properties?.probability ?? zone.probability) || 0) * 100;
+
+      const marker = L.circleMarker([lat, lng], {
+        radius: 6,
+        stroke: false,
+        fillColor: color,
+        fillOpacity: 0.8,
+      });
+
+      marker.bindTooltip(
+        `Risk: ${zone.properties?.riskLevel || zone.riskLevel || 'UNKNOWN'}<br/>Prob: ${fmt(prob)}%`,
+        { sticky: true }
+      );
+
+      marker.on('click', (e) => {
+        if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+        if (onPointClick) onPointClick(zone.properties || zone);
+      });
+
+      markers.push(marker);
+    }
+
+    // Bulk-add all markers at once (much faster than adding one by one)
+    clusterGroupRef.current.addLayers(markers);
+
+    return () => {
+      if (clusterGroupRef.current) {
+        clusterGroupRef.current.clearLayers();
+      }
+    };
+  }, [map, liveRiskPoints, onPointClick]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (clusterGroupRef.current && map) {
+        map.removeLayer(clusterGroupRef.current);
+        clusterGroupRef.current = null;
+      }
+    };
+  }, [map]);
+
+  return null;
+};
+
 // ── Main Map Component ─────────────────────────────────────────────────
 
 /**
@@ -219,10 +303,11 @@ const Map = ({
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <LiveRiskLoadingIndicator loading={liveLoading} />
 
-      <MapContainer center={[25.5, 91.5]} zoom={6} style={{ height: '80vh', width: '100%' }}>
+      <MapContainer center={[25.5, 91.5]} zoom={6} maxZoom={18} style={{ height: '80vh', width: '100%' }}>
         <StatePanner selectedState={selectedState} />
         <MapClickHandler onMapClick={onMapClick} />
         <LiveRiskLayer onViewportChange={onViewportChange} />
+        <ClusteredRiskLayer liveRiskPoints={liveRiskPoints} onPointClick={onPointClick} />
 
         <LayersControl position="topright">
           {/* ── Base Layers ──────────────────────────────── */}
@@ -238,52 +323,6 @@ const Map = ({
               url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
             />
           </BaseLayer>
-
-          {/* ── Landslide Points (Risk Zones) ──────────────── */}
-          <Overlay checked name={t.landslidePoints}>
-            <LayerGroup>
-              {liveRiskPoints
-                .filter((zone) => {
-                  const riskLevel = (zone.properties?.riskLevel || zone.riskLevel || 'UNKNOWN').toUpperCase();
-                  // Drop entirely safe zones or API failures before mapping
-                  return riskLevel !== 'LOW' && riskLevel !== 'UNKNOWN' && !riskLevel.includes('PARTIAL');
-                })
-                .map((zone, index) => {
-                  const lat = parseFloat(zone.properties?.center_lat || zone.lat || zone.latitude);
-                  const lng = parseFloat(zone.properties?.center_lng || zone.lon || zone.longitude);
-                  if (isNaN(lat) || isNaN(lng)) return null;
-
-                  const risk = (zone.properties?.riskLevel || zone.riskLevel || 'UNKNOWN').toUpperCase();
-                  
-                  // Explicit color fallbacks
-                  const markerColor = risk === 'CRITICAL' ? '#ef4444' : 
-                                      risk === 'HIGH' ? '#f97316' : 
-                                      '#eab308'; // Medium/Moderate
-
-                  return (
-                    <CircleMarker
-                      key={`risk-${index}`}
-                      center={[lat, lng]}
-                      radius={6}
-                      stroke={false}
-                      pathOptions={{ fillColor: markerColor, fillOpacity: 0.8 }}
-                      eventHandlers={{
-                        click: (e) => {
-                          if (e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
-                          if (onPointClick) onPointClick(zone.properties || zone);
-                        }
-                      }}
-                    >
-                      <Tooltip sticky>
-                        Risk: {zone.properties?.riskLevel || zone.riskLevel || 'UNKNOWN'}
-                        <br />
-                        Prob: {fmt(((zone.properties?.probability ?? zone.probability) || 0) * 100)}%
-                      </Tooltip>
-                    </CircleMarker>
-                  );
-                })}
-            </LayerGroup>
-          </Overlay>
 
           {/* ── Risk Corridors ────────────────────────────── */}
           <Overlay name={t.riskCorridors}>

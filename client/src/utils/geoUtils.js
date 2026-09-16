@@ -68,31 +68,67 @@ export function convexHull(pts) {
   return lower.concat(upper);
 }
 
-// ── DBSCAN-style spatial clustering ────────────────────────────────────
-
 /**
- * Simple DBSCAN clustering of geo points.
+ * Grid-indexed DBSCAN clustering of geo points.
+ * Uses a spatial hash grid so regionQuery checks only 9 neighboring cells
+ * instead of all N points — O(n×k) instead of O(n²).
+ *
  * @param {Array<{lat, lng, ...}>} points
  * @param {number} epsKm — max distance to consider neighbours
  * @param {number} minPts — min cluster size
  * @returns {Array<Array<object>>} — array of clusters (each an array of points)
  */
 function dbscan(points, epsKm, minPts) {
-  const labels = new Array(points.length).fill(-1); // -1 = unvisited
-  let clusterId = 0;
+  const n = points.length;
+  if (n === 0) return [];
 
+  // Approximate cell size in degrees (1° lat ≈ 111 km)
+  const cellDeg = epsKm / 111;
+
+  // Build spatial hash grid: cellKey → [pointIndex, ...]
+  const grid = new Map();
+  const cellKeys = new Array(n);
+
+  function getCellKey(lat, lng) {
+    const ci = Math.floor(lat / cellDeg);
+    const cj = Math.floor(lng / cellDeg);
+    return `${ci},${cj}`;
+  }
+
+  for (let i = 0; i < n; i++) {
+    const key = getCellKey(points[i].lat, points[i].lng);
+    cellKeys[i] = key;
+    let bucket = grid.get(key);
+    if (!bucket) { bucket = []; grid.set(key, bucket); }
+    bucket.push(i);
+  }
+
+  /** Return indices of all points within epsKm of points[idx]. */
   function regionQuery(idx) {
-    const neighbours = [];
     const p = points[idx];
-    for (let i = 0; i < points.length; i++) {
-      if (haversineKm(p.lat, p.lng, points[i].lat, points[i].lng) <= epsKm) {
-        neighbours.push(i);
+    const ci = Math.floor(p.lat / cellDeg);
+    const cj = Math.floor(p.lng / cellDeg);
+    const neighbours = [];
+
+    // Check 3×3 neighborhood of cells
+    for (let di = -1; di <= 1; di++) {
+      for (let dj = -1; dj <= 1; dj++) {
+        const bucket = grid.get(`${ci + di},${cj + dj}`);
+        if (!bucket) continue;
+        for (const i of bucket) {
+          if (haversineKm(p.lat, p.lng, points[i].lat, points[i].lng) <= epsKm) {
+            neighbours.push(i);
+          }
+        }
       }
     }
     return neighbours;
   }
 
-  for (let i = 0; i < points.length; i++) {
+  const labels = new Int32Array(n).fill(-1); // -1 = unvisited
+  let clusterId = 0;
+
+  for (let i = 0; i < n; i++) {
     if (labels[i] !== -1) continue;
     const neighbours = regionQuery(i);
     if (neighbours.length < minPts) {
@@ -101,6 +137,7 @@ function dbscan(points, epsKm, minPts) {
     }
     labels[i] = clusterId;
     const seed = [...neighbours];
+    const inSeed = new Set(seed);
     for (let j = 0; j < seed.length; j++) {
       const q = seed[j];
       if (labels[q] === -2) labels[q] = clusterId;
@@ -108,8 +145,11 @@ function dbscan(points, epsKm, minPts) {
       labels[q] = clusterId;
       const qNeighbours = regionQuery(q);
       if (qNeighbours.length >= minPts) {
-        for (const n of qNeighbours) {
-          if (!seed.includes(n)) seed.push(n);
+        for (const nb of qNeighbours) {
+          if (!inSeed.has(nb)) {
+            inSeed.add(nb);
+            seed.push(nb);
+          }
         }
       }
     }
@@ -117,7 +157,7 @@ function dbscan(points, epsKm, minPts) {
   }
 
   const clusters = [];
-  for (let i = 0; i < points.length; i++) {
+  for (let i = 0; i < n; i++) {
     if (labels[i] >= 0) {
       if (!clusters[labels[i]]) clusters[labels[i]] = [];
       clusters[labels[i]].push(points[i]);

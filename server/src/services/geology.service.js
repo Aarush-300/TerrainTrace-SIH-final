@@ -61,18 +61,26 @@ async function getLithology(location) {
   const key = cacheKey(location);
   const cached = lithologyCache.get(key);
   if (cached !== undefined) return cached;
-  const response = await axios.get(LITHOLOGY_URL, {
-    params: { lat: location.latitude, lng: location.longitude },
-    timeout: Number(process.env.GEOLOGY_TIMEOUT_MS) || 8000
-  });
-  const lithology = response.data?.success?.data?.[0]?.lith;
-  const value = typeof lithology === 'string' && lithology.trim() ? lithology.trim().toLowerCase() : undefined;
-  lithologyCache.set(key, value);
-  return value;
+  
+  try {
+    const response = await axios.get(LITHOLOGY_URL, {
+      params: { lat: location.latitude, lng: location.longitude },
+      timeout: Number(process.env.GEOLOGY_TIMEOUT_MS) || 8000
+    });
+    const lithology = response.data?.success?.data?.[0]?.lith;
+    const value = typeof lithology === 'string' && lithology.trim() ? lithology.trim().toLowerCase() : undefined;
+    lithologyCache.set(key, value);
+    return value;
+  } catch (error) {
+    console.warn('[Geology Service] Macrostrat API error:', error.message);
+    return undefined; // Safe default value
+  }
 }
 
 async function getGeologyFeatures(location, requestedDefinitions) {
-  const requested = new Set(requestedDefinitions.map(({ provider_key: key }) => key));
+  // Use a fallback if requestedDefinitions is undefined (e.g. from viewportController)
+  const definitions = requestedDefinitions || [{ provider_key: 'lithology' }, { provider_key: 'fault_distance' }];
+  const requested = new Set(definitions.map(({ provider_key: key }) => key));
   const values = {};
   const errors = [];
 

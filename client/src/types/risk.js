@@ -5,6 +5,7 @@
 
 export const RISK_COLORS = {
   LOW:      '#22c55e',
+  MODERATE: '#eab308',
   MEDIUM:   '#eab308',
   HIGH:     '#f97316',
   CRITICAL: '#ef4444',

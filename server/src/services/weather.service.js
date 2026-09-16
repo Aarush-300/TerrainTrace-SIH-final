@@ -74,4 +74,80 @@ async function getWeatherFeatures(location) {
   }
 }
 
-module.exports = { getWeatherFeatures, buildValues };
+async function getWeatherFeaturesBatch(locations) {
+  const results = new Array(locations.length);
+  const uncachedIndices = [];
+  const uncachedLocations = [];
+
+  for (let i = 0; i < locations.length; i++) {
+    const loc = locations[i];
+    const key = cacheKey(loc);
+    const cached = cache.get(key);
+    if (cached) {
+      results[i] = { ...cached, cached: true };
+    } else {
+      uncachedIndices.push(i);
+      uncachedLocations.push(loc);
+    }
+  }
+
+  if (uncachedLocations.length === 0) {
+    return results;
+  }
+
+  const BATCH_SIZE = 50;
+  for (let i = 0; i < uncachedLocations.length; i += BATCH_SIZE) {
+    const batchLocs = uncachedLocations.slice(i, i + BATCH_SIZE);
+    const batchIndices = uncachedIndices.slice(i, i + BATCH_SIZE);
+    
+    const lats = batchLocs.map(l => l.latitude).join(',');
+    const lons = batchLocs.map(l => l.longitude).join(',');
+
+    try {
+      const response = await axios.get(WEATHER_URL, {
+        params: {
+          latitude: lats,
+          longitude: lons,
+          hourly: 'precipitation,soil_moisture_0_to_7cm',
+          past_hours: 72,
+          forecast_hours: 1,
+          timezone: 'UTC'
+        },
+        timeout: Number(process.env.WEATHER_TIMEOUT_MS) || 8000
+      });
+
+      const dataArray = Array.isArray(response.data) ? response.data : [response.data];
+
+      for (let j = 0; j < dataArray.length; j++) {
+        const data = dataArray[j];
+        const hourlyTimes = data?.hourly?.time;
+        const result = {
+          values: buildValues(data),
+          dataTimestamp: Array.isArray(hourlyTimes) ? hourlyTimes.at(-1) || null : null,
+          source: 'open-meteo',
+          status: 'ok'
+        };
+        const locIndex = batchIndices[j];
+        const loc = locations[locIndex];
+        const key = cacheKey(loc);
+        cache.set(key, result);
+        results[locIndex] = result;
+      }
+    } catch (error) {
+      for (let j = 0; j < batchIndices.length; j++) {
+        const locIndex = batchIndices[j];
+        results[locIndex] = {
+          values: {},
+          dataTimestamp: null,
+          source: 'open-meteo',
+          status: 'unavailable',
+          error: error.message
+        };
+      }
+    }
+  }
+
+  return results;
+}
+
+module.exports = { getWeatherFeatures, getWeatherFeaturesBatch, buildValues };

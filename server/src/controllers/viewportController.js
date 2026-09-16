@@ -9,14 +9,15 @@
 
 const { parseLocation } = require('../utils/validation');
 const { getRiskLevel } = require('../utils/risk-levels');
-const { collectFeatures } = require('../services/feature.service');
+const { getWeatherFeaturesBatch } = require('../services/weather.service');
+const { getTerrainFeaturesBatch } = require('../services/terrain.service');
+const { getGeologyFeatures } = require('../services/geology.service');
 const mlService = require('../services/ml.service');
 const { TtlCache } = require('../utils/cache');
 const { getSlope } = require('../utils/demReader');
 
 // ── Configuration ──────────────────────────────────────────────────────
 const MAX_POINTS = 12000;
-const CONCURRENCY = 2;
 const VIEWPORT_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
 const cache = new TtlCache(VIEWPORT_CACHE_TTL);
@@ -69,8 +70,10 @@ async function getViewportRisk(req, res, next) {
 
     const centerLat = (startLat + endLat) / 2;
     const centerLng = (startLng + endLng) / 2;
-    const regionalData = await collectFeatures({ latitude: centerLat, longitude: centerLng });
-    const regionalFeats = regionalData.features || {};
+    
+    // Geology uses center point
+    const geologyData = await getGeologyFeatures({ latitude: centerLat, longitude: centerLng });
+    const geologyFeats = geologyData.values || {};
 
     const pointsToProcess = [];
     const cachedFeatures = [];
@@ -114,12 +117,32 @@ async function getViewportRisk(req, res, next) {
       }
     }
 
+    // 4. Batch fetch weather and terrain for valid points
+    const batchLocs = validUncachedPoints.map(p => ({ latitude: p.pLat, longitude: p.pLng }));
+    let weatherBatchResults = [];
+    let terrainBatchResults = [];
+
+    if (batchLocs.length > 0) {
+      [weatherBatchResults, terrainBatchResults] = await Promise.all([
+        getWeatherFeaturesBatch(batchLocs),
+        getTerrainFeaturesBatch(batchLocs)
+      ]);
+    }
+
     // 5. Build features array for batch prediction
-    const batchFeatures = validUncachedPoints.map(p => {
+    const batchFeatures = validUncachedPoints.map((p, i) => {
+      const weather = weatherBatchResults[i]?.values || {};
+      const terrain = terrainBatchResults[i]?.values || {};
+      const elevation = terrain.elevation !== undefined ? terrain.elevation : p.slopeDeg * 100;
+      
       return {
-        ...regionalFeats,
-        slope_deg: p.slopeDeg,
-        elevation_m: p.slopeDeg * 100
+        rainfall_24h_intensity: weather.rainfall_24h,
+        rainfall_3d_mm: weather.rainfall_3d,
+        soil_moisture_pct: weather.soil_moisture,
+        elevation_m: elevation,
+        slope_deg: p.slopeDeg, // DEM slope preferred
+        lithology: geologyFeats.lithology,
+        fault_distance_m: geologyFeats.fault_distance
       };
     });
 
@@ -175,6 +198,7 @@ async function getViewportRisk(req, res, next) {
       },
     });
   } catch (error) {
+    console.error("Viewport Error:", error);
     return next(error);
   }
 }

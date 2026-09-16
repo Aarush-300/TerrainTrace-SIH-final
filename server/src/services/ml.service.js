@@ -45,6 +45,12 @@ async function predictBatch(featuresList) {
     });
   } catch (error) {
     if (error instanceof MlServiceError) throw error;
+    
+    console.error('[ML Service] predictBatch failed:', error.message);
+    if (error.response?.data) {
+      console.error('[ML Service] Error details from Python:', error.response.data);
+    }
+    
     const message = error.response?.data?.error || error.message || 'ML service is unavailable';
     throw new MlServiceError(message, error.response?.status && error.response.status < 500 ? error.response.status : 502);
   }
